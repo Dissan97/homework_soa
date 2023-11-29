@@ -1,59 +1,87 @@
-#include <stdio.h>
-#include <stdlib.h>
 #include <unistd.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>	
 #include <pthread.h>
-
-
-#define THREADS (4)
-#define GOTO_SLEEP (134)
-#define AWAKE (174)
-
+#define SLEEP (174)
+#define AWAKE (177)
 #define AUDIT if (1)
 
-void *worker(void *dummy);
+#define THREADS (4)
+#define get_id(dummy) (long) dummy
 
-int main(){
 
-    long i;
-    pthread_t *tids;
 
-    if ((tids = malloc(sizeof(pthread_t) * THREADS)) == NULL){
-        perror("Cannot use malloc function");
-        exit(EXIT_FAILURE);
-    }
+void *goto_sleep(void *dummy){
+	int id = get_id(dummy);
+	
+	AUDIT{
+		printf("Thread[%d]: ready to sleep\n", id);
+		fflush(stdout);
+	}
 
-    for (i =0; i < THREADS; i++){
-        if (pthread_create(&tids[i], NULL, worker, (void *) i)){
-            perror("Cannot create a thead");
-            exit(EXIT_FAILURE);
-        }
-    }
+	syscall(SLEEP);
 
-    sleep(4);
+	AUDIT{
+		printf("Thread[%d]: some budy wake me up\n", id);
+		fflush(stdout);
+	}
 
-    sycall(AWAKE);
-    
+	pthread_exit((void *)&id);
 
-    for ( i = 0; i < THREADS; i++)
-    {
-        if (pthread_join(tids[i], NULL)){
-            perror("Something wrong with pthread_join");
-            exit(EXIT_FAILURE);
-        }
-    }
-
-    AUDIT
-    printf("Main threed done\n");
-    
-    return EXIT_SUCCESS;
 }
 
-void *worker(void *dummy){
-    int id = (long) dummy;
-    AUDIT
-    printf("Thread[%d]: I'M alive ready to go to sleep\n", id);
-    syscall(GOTO_SLEEP);
-    AUDIT
-    printf("Thread[%d]: Now i'm awake\n", id);
-    pthread_exit((void *)AWAKE);
+void *awake(void *dummy){
+	int id = get_id(dummy);
+	int i;
+	AUDIT{
+		printf("Thread[%d]: I'll wait some time before awake\n", id);
+		fflush(stdout);
+	}
+	sleep(4);
+	AUDIT{
+		printf("Thread[%d]: Ok now i can awake all\n", id);
+		fflush(stdout);
+	}
+	syscall(AWAKE);
+	
+
+}
+
+
+
+int main(int argc, char **argv){
+
+	long i;
+	pthread_t *tids;
+
+	tids = malloc(sizeof(pthread_t) * (THREADS * 2));
+	if (tids == NULL){
+		perror("Some probelm with malloc\n");
+		exit(EXIT_FAILURE);
+	}
+
+	for (i = 0; i < (THREADS + 1) ; i++){
+		if (i < THREADS){
+			if (pthread_create(&tids[i], NULL, goto_sleep, (void *)i)){
+				perror("Some problem with pthread create");
+				exit(EXIT_FAILURE);
+			}
+		}else{
+			if (pthread_create(&tids[i], NULL, awake, (void *)i)){
+				perror("Some problem with pthread create");
+				exit(EXIT_FAILURE);
+			}
+		}
+	}
+
+	for (i = 0; i < (THREADS * 1); i++ ){
+		if (pthread_join(tids[i], NULL)){
+			perror("Some problem with pthread_join\n");
+			exit(EXIT_FAILURE);
+		}
+	}
+
+	exit(EXIT_SUCCESS);
+
 }

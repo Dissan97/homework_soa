@@ -1,3 +1,24 @@
+/*
+* 
+* This is free software; you can redistribute it and/or modify it under the
+* terms of the GNU General Public License as published by the Free Software
+* Foundation; either version 3 of the License, or (at your option) any later
+* version.
+* 
+* This module is distributed in the hope that it will be useful, but WITHOUT ANY
+* WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR
+* A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+* 
+* @file virtual-to-physical-memory-mapper.c 
+* @brief This is the main source for the Linux Kernel Module which implements
+*       a system call that can be used to query the kernel for current mappings of virtual pages to 
+*	physical frames - this service is x86_64 specific in the curent implementation
+*
+* @author Francesco Quaglia
+*
+* @date November 10, 2021
+*/
+
 #define EXPORT_SYMTAB
 #include <linux/module.h>
 #include <linux/kernel.h>
@@ -18,227 +39,215 @@
 #include <asm/page.h>
 #include <asm/cacheflush.h>
 #include <asm/apic.h>
+#include <asm/io.h>
+#include <linux/wait.h>
+#include <asm/atomic.h>
 #include <linux/syscalls.h>
 
-#define MODNAME "Blocking Queue Service"
 
-MODULE_DESCRIPTION("Implementation of a Linux kernel subsystem dealing with thread management: {sleep, awake}");
+#include "lib/include/scth.h"
+
+
+
+
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Dissan Uddin Ahmed <pc.dissan@gmail.com>");
+MODULE_DESCRIPTION("details on the usage of printk");
+
+#define MODNAME "BQS"
 
 unsigned long the_syscall_table = 0x0;
 module_param(the_syscall_table, ulong, 0660);
+unsigned long sleeping_thread = 0x0;
+module_param(sleeping_thread, ulong, 0660);
 
 unsigned long the_ni_syscall;
-unsigned long new_syscall_array[] = {0x0}; // set to sys_vtpmo at startup
 
-#define HACKED_ENTRIES (int)(sizeof(new_syscall_array) / sizeof(unsigned long))
-int restore[HACKED_ENTRIES] = {[0 ... (HACKED_ENTRIES - 1)] - 1};
+spinlock_t bqs_lock;
 
-#define AUDIT if (1)
+unsigned long new_sys_call_array[] = {0, 0};//please set to sys_vtpmo at startup
+#define HACKED_ENTRIES (int)(sizeof(new_sys_call_array)/sizeof(unsigned long))
+int restore[HACKED_ENTRIES] = {[0 ... (HACKED_ENTRIES-1)] -1};
 
-#define NO (0x0)
-#define YES ((NO ^ 0x1))
-
-static int service_sleep = 1;
-module_param(service_sleep, int, 0660);
-unsigned long sleeping_threads __attribute__((aligned(8)));
-module_param(sleeping_threads, ulong, 0660); 
-
-typedef struct __thread_sleeping_info
-{
-    struct task_struct *task;
-    int pid;
-    int awake;
-    int is_hit;
-    struct __thread_sleeping_info *next;
-    struct __thread_sleeping_info *prev;
-} tsi_t;
-
-tsi_t head = {NULL, -1, -1, -1, NULL, NULL};
-tsi_t tail = {NULL, -1, -1, -1, NULL, NULL};
-spinlock_t lock;
-
-
-#define LIBNAME "SCTH"
 
 
 #define AUDIT if(1)
-#define LEVEL3_AUDIT if(0)
+#define NO (0x0)
+#define YES (0x1)
 
-#define MAX_ACQUIRES 4
+typedef struct bqs_node{
+        struct task_struct *the_task;
+        unsigned long node_pid;
+        int is_awake;
+        int is_hit;
+        struct bqs_node *prev;
+        struct bqs_node *next;
+}bqs_node_t;
+
+bqs_node_t head;
+bqs_node_t tail;
 
 
-//stuff for sys cal table hacking
-#if LINUX_VERSION_CODE > KERNEL_VERSION(3,3,0)
-    #include <asm/switch_to.h>
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,17,0)
+__SYSCALL_DEFINEx(1, _goto_sleep, unsigned long, none){
 #else
-    #include <asm/system.h>
-#endif
-#ifndef X86_CR0_WP
-#define X86_CR0_WP 0x00010000
+asmlinkage long sys_goto_sleep(void){
 #endif
 
-unsigned long cr0;
-static inline void write_cr0_forced(unsigned long val) {
-    unsigned long __force_order;
+        bqs_node_t me;
 
-    /* __asm__ __volatile__( */
-    asm volatile(
-        "mov %0, %%cr0"
-        : "+r"(val), "+m"(__force_order));
-}
+        DECLARE_WAIT_QUEUE_HEAD(bqs_queue_list);
 
-void protect_memory(void){
-    write_cr0_forced(cr0);
-}
+        
+        preempt_disable();
+        printk("%s before spinlock %d", MODNAME, current->pid);
+        spin_lock(&bqs_lock);
+        me.next = &tail;
+        me.prev = tail.prev;
+        tail.prev->next = &me;
+        tail.prev = &me;
+        me.is_hit = NO;
+        spin_unlock(&bqs_lock);
+        printk("%s after spinlock %d", MODNAME, current->pid);
+        preempt_enable();
 
-void unprotect_memory(void){
-    cr0 = read_cr0();
-    write_cr0_forced(cr0 & ~X86_CR0_WP);
-}
-
-
-
-int get_entries(int * entry_ids, int num_acquires, unsigned long sys_call_table, unsigned long *sys_ni_sys_call) {
-
-        unsigned long * p;
-        unsigned long addr;
-        int i,j,z,k; //stuff to discover memory contents
-        int ret = 0;
-	int restore[MAX_ACQUIRES] = {[0 ... (MAX_ACQUIRES-1)] -1};
-
-
-        printk("%s: trying to get %d entries from the sys-call table at address %px\n",LIBNAME,num_acquires, (void*)sys_call_table);
-	if(num_acquires < 1){
-       		 printk("%s: less than 1 sys-call table entry requested\n",LIBNAME);
-		 return -1;
-	}
-	if(num_acquires > MAX_ACQUIRES){
-       		 printk("%s: more than %d sys-call table entries requested\n",LIBNAME, MAX_ACQUIRES);
-		 return -1;
+        AUDIT{
+		printk("%s: ------------------------------\n",MODNAME);
+		printk("%s: aksed to %d to sleep :D\n",MODNAME, current->pid);
 	}
 
-	p = (unsigned long*)sys_call_table;
+        me.is_awake = NO;
+        atomic_inc((atomic_t *)&sleeping_thread);
+#ifdef CLASSIC
+        wait_event_interruptible(bqs_queue_list, (me.is_awake == YES));
+#else
+        me.the_task = current;
+        me.node_pid = current->pid;
+        wait_event_interruptible(bqs_queue_list, (me.is_awake == YES));
+#endif
 
-        j = -1;
-        for (i=0; i<256; i++){
-		for(z=i+1; z<256; z++){
-			if(p[i] == p[z]){
-				AUDIT{
-                        		printk("%s: table entries %d and %d keep the same address\n",LIBNAME,i,z);
-                        		printk("%s: sys_ni_syscall correctly located at %px\n",LIBNAME,(void*)p[i]);
-				}
-				addr = p[i];
-                        	if(j < (num_acquires-1)){
-				       	restore[++j] = i;
-					ret++;
-                        		printk("%s: acquiring table entry %d\n",LIBNAME,i);
-				}
-                        	if(j < (num_acquires-1)){
-                        		restore[++j] = z;
-					ret++;
-                        		printk("%s: acquiring table entry %d\n",LIBNAME,z);
-				}
-				for(k=z+1;k<256 && j < (num_acquires-1); k++){
-					if(p[i] == p[k]){
-                        			printk("%s: acquiring table entry %d\n",LIBNAME,k);
-                        			restore[++j] = k;
-						ret++;
-					}
-				}
-				if(ret == num_acquires){
-					goto found_available_entries;
-				}
-				return -1;	
-			}
-                }
+        AUDIT{
+                printk("%s: ------------------------------\n",MODNAME);
+		printk("%s: Good morning[%d]: xD\n",MODNAME, current->pid);
         }
 
-        printk("%s: could not locate %d available entries in the sys-call table\n",LIBNAME,num_acquires);
+        if (me.is_awake == NO){
+                printk("%s Some error occured lol\n", MODNAME);
+                return -1;
+        }
 
-	return -1;
-
-found_available_entries:
-	printk("%s: ret is %d\n",LIBNAME,ret);
-	memcpy((char*)entry_ids,(char*)restore,ret*sizeof(int));
-	*sys_ni_sys_call = addr;
-
-	return ret;
-
+        atomic_dec((atomic_t *)&sleeping_thread);
+	return 0;
+	
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 17, 0)
-__SYSCALL_DEFINEx(1,_goto_sleep,int, unused){
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,17,0)
+__SYSCALL_DEFINEx(1, _awake, unsigned long, none){
 #else
-asmlinkage void sys_goto_sleep(void){
-#endif
-    printk("[%s]: SYCALL GOTO_SLEEP", MODNAME);
-    return 0;
-}
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 17, 0)
-__SYSCALL_DEFINEx(1,_awake,int, unused){
-#else
-asmlinkage void sys_awake(void){
-#endif
-    printk("[%s]: SYSCALL AWAKE", MODNAME);
-    return 0;
-}
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 17, 0)
-long sys_goto_sleep = (unsigned long) __x64_sys_goto_sleep;
-long sys_awake = (unsigned long) __x64_sys_awake;
-#else
+asmlinkage long sys_awake(void){
 #endif
 
-int init_module (void){
-    int i;
-    int ret;
+        struct task_struct *the_task;
+        int the_pid = -1;
+        bqs_node_t *target;
+        target = &head;
 
-    if (the_syscall_table == 0x0){
-        printk("[%s]: Cannot manage syscall table addr -> 0x0\n", MODNAME);
-        return -1;
-    }
+        AUDIT{
+		printk("%s: ------------------------------\n",MODNAME);
+		printk("%s: SYSCALL_AWAKE\n",MODNAME);
+	}
 
-    AUDIT{
-        printk("[%s]: Got the syscall_table_address -> %px\n", MODNAME, (void *)the_syscall_table);
-        printk("[%s]: init hacked_entries=%d", MODNAME, HACKED_ENTRIES);
-    }
+        preempt_disable();
+        spin_lock(&bqs_lock);
 
-    spin_lock_init(&lock);
+        if (target == NULL){
+                printk("%s:No queue found\n",MODNAME);
+                spin_unlock(&bqs_lock);
+                return -1;
+        }
+        
+        while (target -> next != &tail){
+                printk("%s: ------------------------------\n",MODNAME);
+		printk("%s: starting waking_up\n",MODNAME);
+                if (target->next->is_hit == NO){
+                        the_task = target->next->the_task;
+                        target->next->is_awake = YES;
+                        target->next->is_hit = YES;
+                        the_pid = target->next->node_pid;
+                        wake_up_process(the_task);
+                }
 
-    head.next = &tail;
-    tail.prev = &head;
-
-    new_syscall_array[0] = (unsigned long)sys_goto_sleep;
-    new_syscall_array[1] = (unsigned long)sys_awake;
-
-    ret = get_entries(restore, HACKED_ENTRIES, (unsigned long *) the_syscall_table, &the_ni_syscall);
-
-    if (ret != HACKED_ENTRIES){
-        printk("[%s]: could not hack %d entries could just (%d)\n", MODNAME, HACKED_ENTRIES, ret);
-        return -1;
-    }
-
-    unprotect_memory();
-
-    for (i = 0; i < HACKED_ENTRIES; i++){
-        ((unsigned long*)the_syscall_table)[restore[i]] = (unsigned long) new_syscall_array[i];
-    }
-    protect_memory();
-
-    printk("[%s]: all the syscall installed correctly\n", MODNAME);
-    return 0;
+                target->next = target->next->next;
+        }
+        spin_unlock(&bqs_lock);
+        preempt_enable();
+	return 0;
+	
 }
 
-void cleanup_module(void){
-    int i;
-    
-    printk("[%s]: Shutdown mod\n", MODNAME);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,17,0)
+long sys_goto_sleep = (unsigned long) __x64_sys_goto_sleep;   
+long sys_awake = (unsigned long) __x64_sys_awake;       
+#else
+#endif
 
-    unprotect_memory();
-    for (i=0; i < HACKED_ENTRIES; i++){
-        ((unsigned long *)the_syscall_table)[restore[i]] = the_ni_syscall;
-    }
-    protect_memory();
-    printk("[%s]: Origninal Syscal_table_restored\n", MODNAME);
+
+int init_module(void) {
+
+        int i;
+        int ret;
+
+        if (the_syscall_table == 0x0){
+           printk("%s: cannot manage sys_call_table address set to 0x0\n",MODNAME);
+           return -1;
+        }
+
+	AUDIT{
+	   printk("%s: printk-example received sys_call_table address %px\n",MODNAME,(void*)the_syscall_table);
+     	   printk("%s: initializing - hacked entries %d\n",MODNAME,HACKED_ENTRIES);
+	}
+
+	new_sys_call_array[0] = (unsigned long)sys_goto_sleep;
+        new_sys_call_array[1] = (unsigned long)sys_awake;
+
+
+        ret = get_entries(restore,HACKED_ENTRIES,(unsigned long*)the_syscall_table,&the_ni_syscall);
+
+        if (ret != HACKED_ENTRIES){
+                printk("%s: could not hack %d entries (just %d)\n",MODNAME,HACKED_ENTRIES,ret); 
+                return -1;      
+        }
+
+        head.next = &tail;
+        tail.prev = &head;
+
+        spin_lock_init(&bqs_lock);
+
+	unprotect_memory();
+
+        for(i=0;i<HACKED_ENTRIES;i++){
+                ((unsigned long *)the_syscall_table)[restore[i]] = (unsigned long)new_sys_call_array[i];
+        }
+
+	protect_memory();
+
+        printk("%s: all new system-calls correctly installed on sys-call table\n",MODNAME);
+
+        return 0;
+
+}
+
+void cleanup_module(void) {
+
+        int i;
+                
+        printk("%s: shutting down\n",MODNAME);
+
+	unprotect_memory();
+        for(i=0;i<HACKED_ENTRIES;i++){
+                ((unsigned long *)the_syscall_table)[restore[i]] = the_ni_syscall;
+        }
+	protect_memory();
+        printk("%s: sys-call table restored to its original content\n",MODNAME);
+        
 }
