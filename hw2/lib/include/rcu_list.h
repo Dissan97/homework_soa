@@ -1,8 +1,9 @@
 #pragma once
 
 #include <pthread.h>
-
-#define AUDIT if (1)
+#ifndef AUDIT
+    #define AUDIT if (0)
+#endif
 #define LOG if (1)
 #define GRACE_PERIOD 0x1
 typedef struct __element{

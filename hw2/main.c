@@ -5,9 +5,9 @@
 #include <unistd.h>
 
 
-#define WORKERS (5)
-#define OPERATIONS 100
+#define WORKERS (16)
 
+#define OPERATIONS (0xFFFFFFF)
 #define set_alligned_buffer(type, name, size)\
     type __attribute__((aligned(size))) name[size]
 

@@ -3,6 +3,7 @@
 #include <unistd.h>
 #include <stdio.h>
 #include <sys/syscall.h>
+
 void *house_keeper(void *dummy);
 
 int rcu_init(rcu_list_t *l)
@@ -11,6 +12,10 @@ int rcu_init(rcu_list_t *l)
     pthread_spin_init(&l->lock, 0);
     l->pendings = malloc(sizeof(int *) * 2);
     l->epoch_index = 0;
+    element *head = malloc((sizeof(element *)));
+    head->val = -1;
+    head->next = NULL;
+    l->head = head;
     pthread_create(&tid, NULL, house_keeper, (void *)l);
     return 0;
 }
@@ -22,15 +27,18 @@ int rcu_insert(rcu_list_t *l, int val)
     
     if (rcu_search(l, val, 0)){
         element *elem = malloc(sizeof(element *));
+        if (elem == NULL) goto exit_insertion;
         elem->val = val;
-        elem->next = l->head;
         pthread_spin_lock(&l->lock);
-        l->head = elem;
+        elem->next = l->head->next;
+        l->head->next = elem;
+
+        asm volatile ("mfence");
+
         ret = 0;
-        pthread_spin_unlock(&l->lock);
-        if (l->head->next != NULL)
-        printf("l->next->val=%d\n", l->head->next->val);
+        pthread_spin_unlock(&l->lock); 
     }
+exit_insertion:
     
     return ret;
 }
@@ -39,10 +47,18 @@ int rcu_remove(rcu_list_t *l, int val)
 {
     int current_epoch;
     int ret = -1;
-    element *n;
-    element *temp;
+    element *n = l->head->next;
+    element *temp = l->head;
     pthread_spin_lock(&l->lock);
-    n = l->head;
+
+    for (; n != NULL; n = n->next){
+        if (n->val == val) break;
+        temp = n;
+    }
+
+/*
+    if (n == NULL) goto exit_thread;
+
     if (n->val == val) {
         temp = n;
         goto handle_val;
@@ -50,18 +66,22 @@ int rcu_remove(rcu_list_t *l, int val)
     for (; n->next != NULL; n = n->next){
         if (n -> next -> val == val) {
             temp = n->next;
-            n -> next = temp->next;   
             break;
         }
     }
+        if (n == NULL || n -> next == NULL) goto exit_thread;
+*/
+    if (n == NULL) goto exit_thread;
 
-    if (n -> next == NULL) goto exit_thread;
-handle_val:
     current_epoch = l->epoch_index;
     l->epoch_index = (current_epoch + 1) % 2;    
     while(l->pendings[current_epoch]);
     l->pendings[current_epoch] = 0;
-    free(temp);
+    temp->next = n->next;
+    free(n);
+
+    asm volatile ("mfence");
+
     ret = 0;
 exit_thread:
     pthread_spin_unlock(&l->lock);
@@ -92,7 +112,6 @@ void *house_keeper(void *dummy)
 {
     rcu_list_t *l = (rcu_list_t *)dummy;
     int current_epoch;
-    int next_epoch;
 
     while (1){
         sleep(GRACE_PERIOD);
