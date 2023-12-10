@@ -7,6 +7,10 @@
 *.obj
 *.elf
 
+/.idea/
+/.vscode/
+/app
+/a.out/
 # Linker output
 *.ilk
 *.map
